@@ -115,10 +115,39 @@ function initHourDropdown() {
 
 function autoDetectTz() {
     try {
-        autoTz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+        // Detect the standard regional Olson name (e.g. "America/Los_Angeles")
+        const olsonZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles";
+        
+        // Comprehensive POSIX TZ dictionary mapping for microcontrollers (ESP32)
+        const posixMapping = {
+            "America/Los_Angeles": "PST8PDT,M3.2.0,M11.1.0",
+            "America/Denver":      "MST7MDT,M3.2.0,M11.1.0",
+            "America/Phoenix":     "MST7",
+            "America/Chicago":     "CST6CDT,M3.2.0,M11.1.0",
+            "America/New_York":    "EST5EDT,M3.2.0,M11.1.0",
+            "America/Anchorage":   "AKST9AKDT,M3.2.0,M11.1.0",
+            "America/Honolulu":    "HST10",
+            "Europe/London":       "GMT0BST,M3.5.0/1,M10.5.0/2",
+            "Europe/Paris":        "CET1CEST,M3.5.0,M10.5.0/3",
+            "Asia/Tokyo":          "JST-9",
+            "Australia/Sydney":    "AEST-10AEDT,M10.1.0,M4.1.0/3"
+        };
+
+        // Fallback logic: Use the exact match or default to UTC if missing from dictionary
+        autoTz = posixMapping[olsonZone] || "UTC0";
         document.getElementById("timezone").value = autoTz;
+
+        // Log the detected conversion to the interface system log
+        const logDiv = document.getElementById('dataLog');
+        if (logDiv) {
+            logDiv.innerHTML += `🌐 Mapped system zone '${olsonZone}' to POSIX: ${autoTz}<br>`;
+        }
+
     } catch(e) {
-        console.error("Failed to read device timezone metadata", e);
+        console.error("Failed to map POSIX timezone rule configuration string", e);
+        // Universal fallback rule
+        autoTz = "PST8PDT,M3.2.0,M11.1.0"; 
+        document.getElementById("timezone").value = autoTz;
     }
 }
 
