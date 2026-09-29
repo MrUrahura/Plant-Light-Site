@@ -25,6 +25,8 @@
         .row { display: flex; gap: 10px; }
         .row > div { flex: 1; }
         .auto-btn { background: #6f42c1; color: white; font-size: 12px; padding: 6px; margin-bottom: 10px; }
+        .controller-status { background: #eef7ed; padding: 12px; border-radius: 8px; line-height: 1.7; white-space: pre-line; }
+        .manual-optimize { background: #6f42c1; color: white; }
     </style>
 </head>
 <body>
@@ -39,7 +41,13 @@
     </div>
 
     <div class="card">
-        <h2>2. System Configuration</h2>
+        <h2>2. Controller Status</h2>
+        <div id="controllerStatus" class="controller-status">Connect to the controller to read its status.</div>
+        <button class="manual-optimize" id="optimizeBtn" onclick="requestManualOptimization()" disabled>Optimize Now</button>
+    </div>
+
+    <div class="card">
+        <h2>3. System Configuration</h2>
         
         <label for="wifiSsid">WiFi SSID:</label>
         <input type="text" id="wifiSsid" placeholder="Your WiFi Name" oninput="calculateTargetSettings()">
@@ -75,6 +83,48 @@
             </div>
         </div>
 
+        <h3>Servo Movement Times (milliseconds)</h3>
+        <div class="row">
+            <div>
+                <label for="servoTopOpenMs">Top shade open:</label>
+                <input type="number" id="servoTopOpenMs" min="1" max="60000" step="1" value="3825" oninput="calculateTargetSettings()">
+            </div>
+            <div>
+                <label for="servoTopCloseMs">Top shade close:</label>
+                <input type="number" id="servoTopCloseMs" min="1" max="60000" step="1" value="3450" oninput="calculateTargetSettings()">
+            </div>
+        </div>
+        <div class="row">
+            <div>
+                <label for="servoLeftOpenMs">Left shade open:</label>
+                <input type="number" id="servoLeftOpenMs" min="1" max="60000" step="1" value="5000" oninput="calculateTargetSettings()">
+            </div>
+            <div>
+                <label for="servoLeftCloseMs">Left shade close:</label>
+                <input type="number" id="servoLeftCloseMs" min="1" max="60000" step="1" value="4800" oninput="calculateTargetSettings()">
+            </div>
+        </div>
+        <div class="row">
+            <div>
+                <label for="servoRightOpenMs">Right shade open:</label>
+                <input type="number" id="servoRightOpenMs" min="1" max="60000" step="1" value="4625" oninput="calculateTargetSettings()">
+            </div>
+            <div>
+                <label for="servoRightCloseMs">Right shade close:</label>
+                <input type="number" id="servoRightCloseMs" min="1" max="60000" step="1" value="4350" oninput="calculateTargetSettings()">
+            </div>
+        </div>
+
+        <label for="optimizationIntervalMinutes">Optimization schedule:</label>
+        <select id="optimizationIntervalMinutes" onchange="calculateTargetSettings()">
+            <option value="5">Every 5th minute</option>
+            <option value="10">Every 10th minute</option>
+            <option value="15">Every 15th minute</option>
+            <option value="20">Every 20th minute</option>
+            <option value="30" selected>Every 30th minute</option>
+            <option value="60">Every hour</option>
+        </select>
+
         <label for="plantSelect">Select Plant:</label>
         <select id="plantSelect" onchange="calculateTargetSettings()"><option>Awaiting Database...</option></select>
 
@@ -97,6 +147,9 @@ let db = null;
 let bleDevice = null;
 let bleCharacteristic = null;
 let finalPayload = null;
+let bleStatusTimer = null;
+let bleWriteInProgress = false;
+let bleStatusReadInProgress = false;
 
 let autoLat = 0.0;
 let autoLong = 0.0;
@@ -329,7 +382,14 @@ function calculateTargetSettings() {
         pType: plantData.type,
         minDLI: calculatedMinDli,
         maxDLI: calculatedMaxDli,
-        photo: finalPhotoperiod
+        photo: finalPhotoperiod,
+        servoTopOpenMs: Number(document.getElementById('servoTopOpenMs').value),
+        servoTopCloseMs: Number(document.getElementById('servoTopCloseMs').value),
+        servoLeftOpenMs: Number(document.getElementById('servoLeftOpenMs').value),
+        servoLeftCloseMs: Number(document.getElementById('servoLeftCloseMs').value),
+        servoRightOpenMs: Number(document.getElementById('servoRightOpenMs').value),
+        servoRightCloseMs: Number(document.getElementById('servoRightCloseMs').value),
+        optimizationIntervalMinutes: Number(document.getElementById('optimizationIntervalMinutes').value)
     };
 
     previewDiv.innerText = JSON.stringify(finalPayload, null, 2);
@@ -370,9 +430,21 @@ async function connectBLE() {
 
         document.getElementById("timezone").value = settings.tz || "";
         document.getElementById("startHour").value = settings.startHour ?? 0;
+        document.getElementById("servoTopOpenMs").value = settings.servoTopOpenMs ?? 3825;
+        document.getElementById("servoTopCloseMs").value = settings.servoTopCloseMs ?? 3450;
+        document.getElementById("servoLeftOpenMs").value = settings.servoLeftOpenMs ?? 5000;
+        document.getElementById("servoLeftCloseMs").value = settings.servoLeftCloseMs ?? 4800;
+        document.getElementById("servoRightOpenMs").value = settings.servoRightOpenMs ?? 4625;
+        document.getElementById("servoRightCloseMs").value = settings.servoRightCloseMs ?? 4350;
+        document.getElementById("optimizationIntervalMinutes").value = settings.optimizationIntervalMinutes ?? 30;
 
         // Update the payload preview after filling values
         calculateTargetSettings();
+        document.getElementById('optimizeBtn').disabled = false;
+        if (bleStatusTimer) clearInterval(bleStatusTimer);
+        await refreshControllerStatus();
+        bleStatusTimer = setInterval(refreshControllerStatus, 3000);
+        bleDevice.addEventListener('gattserverdisconnected', handleBleDisconnected);
 
         logDiv.innerHTML += `Connected to peripheral device profiles stream.<br>`;
     } catch (error) {
@@ -388,38 +460,131 @@ async function syncToESP32() {
         logDiv.innerHTML += `⚠️ System not ready. Ensure Bluetooth channel is configured.<br>`;
         return;
     }
+    const payloadToSend = { ...finalPayload };
 
+    const movementTimeFields = [
+        'servoTopOpenMs', 'servoTopCloseMs', 'servoLeftOpenMs',
+        'servoLeftCloseMs', 'servoRightOpenMs', 'servoRightCloseMs'
+    ];
+    const invalidField = movementTimeFields.find((id) => {
+        const input = document.getElementById(id);
+        const value = Number(input.value);
+        return !Number.isInteger(value) || value < 1 || value > 60000;
+    });
+    if (invalidField) {
+        document.getElementById(invalidField).focus();
+        logDiv.innerHTML += `❌ Servo movement times must be whole numbers from 1 to 60000 ms.<br>`;
+        return;
+    }
+
+    if (await writeBLEPayload(payloadToSend)) {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        const controllerState = await refreshControllerStatus();
+        const accepted = controllerState && movementTimeFields.every((id) =>
+            controllerState[id] === payloadToSend[id]
+        );
+        if (accepted) {
+            logDiv.innerHTML += `✅ Configuration and servo timings saved by the controller.<br>`;
+        } else {
+            logDiv.innerHTML += `⚠️ Configuration was transmitted, but the controller did not confirm all servo timings. It may be busy; reconnect/read the settings and retry.<br>`;
+        }
+    }
+}
+
+async function writeBLEPayload(payload) {
+    if (!bleCharacteristic || bleWriteInProgress) {
+        document.getElementById('dataLog').innerHTML += `⚠️ Bluetooth is disconnected or another transmission is in progress.<br>`;
+        return false;
+    }
+
+    bleWriteInProgress = true;
     try {
-        const jsonString = JSON.stringify(finalPayload);
-        const encoder = new TextEncoder();
-        const dataBuffer = encoder.encode(jsonString);
-        
+        const dataBuffer = new TextEncoder().encode(JSON.stringify(payload));
         const totalBytes = dataBuffer.byteLength;
-        logDiv.innerHTML += `Preparing transmission sequence packet: ${totalBytes} bytes total...<br>`;
+        document.getElementById('dataLog').innerHTML += `Preparing Bluetooth transmission: ${totalBytes} bytes...<br>`;
 
         const CHUNK_SIZE = 20;
-        let offset = 0;
-
-        while (offset < totalBytes) {
-            const chunk = dataBuffer.slice(offset, offset + CHUNK_SIZE);
-            await bleCharacteristic.writeValueWithoutResponse(chunk);
-            offset += CHUNK_SIZE;
-            logDiv.innerHTML += `Sent processing milestone block: ${Math.min(offset, totalBytes)} of ${totalBytes} bytes...<br>`;
+        for (let offset = 0; offset < totalBytes; offset += CHUNK_SIZE) {
+            await bleCharacteristic.writeValueWithoutResponse(dataBuffer.slice(offset, offset + CHUNK_SIZE));
             await new Promise(resolve => setTimeout(resolve, 50));
         }
-        
-        logDiv.innerHTML += `✅ Data synchronized to flash memory successfully!<br>`;
+        return true;
     } catch (error) {
         console.error(error);
-        logDiv.innerHTML += `❌ Transmission cycle runtime fault: ${error.message}<br>`;
+        document.getElementById('dataLog').innerHTML += `❌ Bluetooth transmission failed: ${error.message}<br>`;
+        return false;
+    } finally {
+        bleWriteInProgress = false;
     }
+}
+
+async function requestManualOptimization() {
+    if (await writeBLEPayload({ optimizeNow: true })) {
+        document.getElementById('dataLog').innerHTML += `✅ Manual optimization request sent.<br>`;
+        await refreshControllerStatus();
+    }
+}
+
+function formatDuration(seconds) {
+    if (seconds < 0) return "Not available";
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainingSeconds = seconds % 60;
+    const parts = [];
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0 || hours > 0) parts.push(`${minutes}m`);
+    parts.push(`${remainingSeconds}s`);
+    return parts.join(" ");
+}
+
+async function refreshControllerStatus() {
+    if (!bleCharacteristic || !bleDevice || !bleDevice.gatt.connected ||
+        bleWriteInProgress || bleStatusReadInProgress) {
+        return null;
+    }
+
+    bleStatusReadInProgress = true;
+    try {
+        const value = await bleCharacteristic.readValue();
+        const state = JSON.parse(new TextDecoder().decode(value));
+        const photoperiod = state.timeSynced
+            ? (state.inPhotoperiod ? "Inside photoperiod" : "Outside photoperiod")
+            : "Waiting for synchronized time";
+        const optimization = state.optimizing ? "Optimization running" : "Optimization idle";
+        const next = formatDuration(state.secondsUntilNextOptimization ?? -1);
+        const previous = formatDuration(state.secondsSincePreviousOptimization ?? -1);
+
+        document.getElementById('controllerStatus').innerText =
+            `${photoperiod}\n${optimization}\nNext optimization: ${next}\nSince previous optimization: ${previous}\nSchedule: every ${state.optimizationIntervalMinutes ?? 30} minute(s)`;
+        document.getElementById('optimizeBtn').disabled =
+            !state.timeSynced || !state.inPhotoperiod || state.optimizing;
+        return state;
+    } catch (error) {
+        console.error(error);
+        document.getElementById('controllerStatus').innerText =
+            `Unable to read controller status: ${error.message}`;
+        return null;
+    } finally {
+        bleStatusReadInProgress = false;
+    }
+}
+
+function handleBleDisconnected() {
+    if (bleStatusTimer) {
+        clearInterval(bleStatusTimer);
+        bleStatusTimer = null;
+    }
+    bleCharacteristic = null;
+    document.getElementById('syncBtn').disabled = true;
+    document.getElementById('optimizeBtn').disabled = true;
+    document.getElementById('controllerStatus').innerText = "Controller disconnected.";
+    setStatus("Status: Disconnected");
 }
 
 function disconnectBLE() {
     if (bleDevice && bleDevice.gatt.connected) {
         bleDevice.gatt.disconnect();
-        setStatus("Status: Disconnected");
-        document.getElementById('syncBtn').disabled = true;
+        handleBleDisconnected();
         document.getElementById('dataLog').innerHTML += "Connection closed by user configuration.<br>";
     }
 }
