@@ -380,6 +380,7 @@ function calculateTargetSettings() {
         tz: finalTz,
         pName: plantData.name,
         pType: plantData.type,
+        pStage: stageName,
         minDLI: calculatedMinDli,
         maxDLI: calculatedMaxDli,
         photo: finalPhotoperiod,
@@ -396,29 +397,93 @@ function calculateTargetSettings() {
 }
 
 // Web Bluetooth Logic Handlers
+async function discoverBleCharacteristic(device) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const server = device.gatt.connected
+                ? device.gatt
+                : await device.gatt.connect();
+            const service = await server.getPrimaryService(SERVICE_UUID);
+            return await service.getCharacteristic(CHARACTERISTIC_UUID);
+        } catch (error) {
+            if (attempt === 1 || device.gatt.connected) {
+                throw error;
+            }
+            await new Promise(resolve => setTimeout(resolve, 250));
+        }
+    }
+    throw new Error("Unable to discover the Bluetooth characteristic.");
+}
+
+function decodeControllerSettings(response) {
+    if (!Array.isArray(response.network) || !Array.isArray(response.plant) ||
+        !Array.isArray(response.servos) || !Array.isArray(response.controller)) {
+        return response;
+    }
+
+    const [ssid, pass, apiKey, startHour, lat, lng, tz] = response.network;
+    const [pName, pType, pStage, minDLI, maxDLI, photo, targetDLI, targetPPFD] = response.plant;
+    const [
+        shadeState, targetShadeState, movingState,
+        servoTopOpenMs, servoTopCloseMs, servoLeftOpenMs,
+        servoLeftCloseMs, servoRightOpenMs, servoRightCloseMs
+    ] = response.servos;
+    const [
+        optimizationIntervalMinutes, timeSynced, inPhotoperiod,
+        optimizing, secondsUntilNextOptimization, secondsSincePreviousOptimization
+    ] = response.controller;
+
+    return {
+        ssid, pass, apiKey, startHour, lat, lng, tz,
+        pName, pType, pStage, minDLI, maxDLI, photo, targetDLI, targetPPFD,
+        servoTopOpenMs, servoTopCloseMs, servoLeftOpenMs, servoLeftCloseMs,
+        servoRightOpenMs, servoRightCloseMs, optimizationIntervalMinutes,
+        timeSynced, inPhotoperiod, optimizing,
+        secondsUntilNextOptimization, secondsSincePreviousOptimization,
+        servoTopClosed: Boolean(shadeState & 1),
+        servoLeftClosed: Boolean(shadeState & 2),
+        servoRightClosed: Boolean(shadeState & 4),
+        servoTopTargetClosed: Boolean(targetShadeState & 1),
+        servoLeftTargetClosed: Boolean(targetShadeState & 2),
+        servoRightTargetClosed: Boolean(targetShadeState & 4),
+        servoTopMoving: Boolean(movingState & 1),
+        servoLeftMoving: Boolean(movingState & 2),
+        servoRightMoving: Boolean(movingState & 4)
+    };
+}
+
 async function connectBLE() {
-    const statusDiv = document.getElementById('status');
     const logDiv = document.getElementById('dataLog');
+    document.getElementById('syncBtn').disabled = true;
+    document.getElementById('optimizeBtn').disabled = true;
     setStatus("Status: Scanning for ESP32 Link...");
     
     try {
-        bleDevice = await navigator.bluetooth.requestDevice({ 
+        if (!window.isSecureContext) {
+            throw new Error("Bluetooth requires a secure HTTPS connection.");
+        }
+        if (!navigator.bluetooth) {
+            throw new Error("Web Bluetooth is unavailable in this browser. On iOS, open this page in a browser that supports Web Bluetooth, such as Bluefy.");
+        }
+        const selectedDevice = await navigator.bluetooth.requestDevice({
             filters: [{ services: [SERVICE_UUID] }] 
         });
-        
-        const server = await bleDevice.gatt.connect();
-        setStatus("Status: Bluetooth Connected!", "green");
-        document.getElementById('syncBtn').disabled = false;
-
-        const service = await server.getPrimaryService(SERVICE_UUID);
-        bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+        if (bleDevice && bleDevice !== selectedDevice) {
+            bleDevice.removeEventListener('gattserverdisconnected', handleBleDisconnected);
+        }
+        bleDevice = selectedDevice;
+        bleDevice.removeEventListener('gattserverdisconnected', handleBleDisconnected);
+        bleDevice.addEventListener('gattserverdisconnected', handleBleDisconnected);
+        bleCharacteristic = await discoverBleCharacteristic(bleDevice);
 
         // Read current ESP32 settings
         const value = await bleCharacteristic.readValue();
         const decoder = new TextDecoder();
         const json = decoder.decode(value);
-        const settings = JSON.parse(json);
-        console.log(settings);
+        const settings = decodeControllerSettings(JSON.parse(json));
+        if (!bleDevice.gatt.connected) {
+            throw new Error("GATT server disconnected while reading controller settings.");
+        }
 
         // Fill input boxes
         document.getElementById("wifiSsid").value = settings.ssid || "";
@@ -438,18 +503,48 @@ async function connectBLE() {
         document.getElementById("servoRightCloseMs").value = settings.servoRightCloseMs ?? 4350;
         document.getElementById("optimizationIntervalMinutes").value = settings.optimizationIntervalMinutes ?? 30;
 
+        const plantOption = Array.from(document.getElementById("plantSelect").options)
+            .find(option => option.textContent === settings.pName);
+        if (plantOption) {
+            document.getElementById("plantSelect").value = plantOption.value;
+        }
+        if (settings.pStage && Array.from(document.getElementById("stageSelect").options)
+            .some(option => option.value === settings.pStage)) {
+            document.getElementById("stageSelect").value = settings.pStage;
+        }
+
         // Update the payload preview after filling values
         calculateTargetSettings();
-        document.getElementById('optimizeBtn').disabled = false;
+        if (finalPayload && settings.pName) {
+            finalPayload = {
+                ...finalPayload,
+                pName: settings.pName,
+                pType: settings.pType ?? finalPayload.pType,
+                pStage: settings.pStage ?? finalPayload.pStage,
+                minDLI: settings.minDLI ?? finalPayload.minDLI,
+                maxDLI: settings.maxDLI ?? finalPayload.maxDLI,
+                photo: settings.photo ?? finalPayload.photo
+            };
+            document.getElementById('preview').innerText = JSON.stringify(finalPayload, null, 2);
+        }
+        setStatus("Status: Bluetooth Connected!", "green");
+        document.getElementById('syncBtn').disabled = false;
         if (bleStatusTimer) clearInterval(bleStatusTimer);
-        await refreshControllerStatus();
         bleStatusTimer = setInterval(refreshControllerStatus, 3000);
-        bleDevice.addEventListener('gattserverdisconnected', handleBleDisconnected);
+        await refreshControllerStatus();
 
         logDiv.innerHTML += `Connected to peripheral device profiles stream.<br>`;
     } catch (error) {
         console.error(error);
-        setStatus("Status: Bluetooth Hook Connection Failed", "red");
+        if (bleStatusTimer) {
+            clearInterval(bleStatusTimer);
+            bleStatusTimer = null;
+        }
+        bleCharacteristic = null;
+        document.getElementById('syncBtn').disabled = true;
+        document.getElementById('optimizeBtn').disabled = true;
+        document.getElementById('controllerStatus').innerText = "Unable to connect. Check that the controller is powered on and reconnect.";
+        setStatus("Status: Bluetooth Connection Failed", "red");
         logDiv.innerHTML += `Connection error matrix: ${error.message}<br>`;
     }
 }
@@ -505,7 +600,14 @@ async function writeBLEPayload(payload) {
 
         const CHUNK_SIZE = 20;
         for (let offset = 0; offset < totalBytes; offset += CHUNK_SIZE) {
-            await bleCharacteristic.writeValueWithoutResponse(dataBuffer.slice(offset, offset + CHUNK_SIZE));
+            const chunk = dataBuffer.slice(offset, offset + CHUNK_SIZE);
+            if (typeof bleCharacteristic.writeValueWithResponse === "function") {
+                await bleCharacteristic.writeValueWithResponse(chunk);
+            } else if (typeof bleCharacteristic.writeValue === "function") {
+                await bleCharacteristic.writeValue(chunk);
+            } else {
+                throw new Error("This browser does not support acknowledged Bluetooth writes.");
+            }
             await new Promise(resolve => setTimeout(resolve, 50));
         }
         return true;
@@ -546,16 +648,25 @@ async function refreshControllerStatus() {
     bleStatusReadInProgress = true;
     try {
         const value = await bleCharacteristic.readValue();
-        const state = JSON.parse(new TextDecoder().decode(value));
+        const state = decodeControllerSettings(JSON.parse(new TextDecoder().decode(value)));
         const photoperiod = state.timeSynced
             ? (state.inPhotoperiod ? "Inside photoperiod" : "Outside photoperiod")
             : "Waiting for synchronized time";
         const optimization = state.optimizing ? "Optimization running" : "Optimization idle";
         const next = formatDuration(state.secondsUntilNextOptimization ?? -1);
         const previous = formatDuration(state.secondsSincePreviousOptimization ?? -1);
+        const shadeStatus = (closed, targetClosed, moving) => {
+            if (typeof closed !== "boolean") return "Unavailable (update controller firmware)";
+            return moving
+                ? `Moving to ${targetClosed ? "closed" : "open"}`
+                : (closed ? "Closed" : "Open");
+        };
+        const plant = state.pName
+            ? `Plant: ${state.pName} (${state.pType || "type unavailable"})\nStage: ${state.pStage || "Not recorded"}\nDLI range: ${state.minDLI ?? "?"}-${state.maxDLI ?? "?"} mol/m²/day; target: ${state.targetDLI ?? "?"} mol/m²/day\nTarget PPFD: ${state.targetPPFD ?? "?"} μmol/m²/s; photoperiod: ${state.photo ?? "?"} hours`
+            : "Plant: Not configured";
 
         document.getElementById('controllerStatus').innerText =
-            `${photoperiod}\n${optimization}\nNext optimization: ${next}\nSince previous optimization: ${previous}\nSchedule: every ${state.optimizationIntervalMinutes ?? 30} minute(s)`;
+            `${photoperiod}\n${optimization}\nNext optimization: ${next}\nSince previous optimization: ${previous}\nSchedule: every ${state.optimizationIntervalMinutes ?? 30} minute(s)\n\nServo states:\nTop: ${shadeStatus(state.servoTopClosed, state.servoTopTargetClosed, state.servoTopMoving)}\nLeft: ${shadeStatus(state.servoLeftClosed, state.servoLeftTargetClosed, state.servoLeftMoving)}\nRight: ${shadeStatus(state.servoRightClosed, state.servoRightTargetClosed, state.servoRightMoving)}\n\n${plant}`;
         document.getElementById('optimizeBtn').disabled =
             !state.timeSynced || !state.inPhotoperiod || state.optimizing;
         return state;
