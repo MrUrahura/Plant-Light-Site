@@ -37,6 +37,7 @@
         <h2>1. Connection Status</h2>
         <button class="connect" onclick="connectBLE()">Connect to ESP32</button>
         <button class="disconnect" onclick="disconnectBLE()">Disconnect</button>
+        <p>On a computer, use Chrome or Edge over HTTPS, turn on Windows Bluetooth, and select <strong>Smart_Plant_Shade</strong> in the device chooser. Disconnect the phone first if it is connected to the controller. Web Bluetooth is not supported by every browser.</p>
         <div id="status">Status: Preparing Environment Setup...</div>
     </div>
 
@@ -150,6 +151,8 @@ let finalPayload = null;
 let bleStatusTimer = null;
 let bleWriteInProgress = false;
 let bleStatusReadInProgress = false;
+let bleAutoReconnectEnabled = false;
+let bleReconnectInProgress = false;
 
 let autoLat = 0.0;
 let autoLong = 0.0;
@@ -454,6 +457,7 @@ function decodeControllerSettings(response) {
 
 async function connectBLE() {
     const logDiv = document.getElementById('dataLog');
+    bleAutoReconnectEnabled = false;
     document.getElementById('syncBtn').disabled = true;
     document.getElementById('optimizeBtn').disabled = true;
     setStatus("Status: Scanning for ESP32 Link...");
@@ -463,7 +467,7 @@ async function connectBLE() {
             throw new Error("Bluetooth requires a secure HTTPS connection.");
         }
         if (!navigator.bluetooth) {
-            throw new Error("Web Bluetooth is unavailable in this browser. On iOS, open this page in a browser that supports Web Bluetooth, such as Bluefy.");
+            throw new Error("Web Bluetooth is unavailable in this browser. On a computer, use Chrome or Edge and open this page over HTTPS (or localhost for local testing).");
         }
         const selectedDevice = await navigator.bluetooth.requestDevice({
             filters: [{ services: [SERVICE_UUID] }] 
@@ -529,13 +533,14 @@ async function connectBLE() {
         }
         setStatus("Status: Bluetooth Connected!", "green");
         document.getElementById('syncBtn').disabled = false;
-        if (bleStatusTimer) clearInterval(bleStatusTimer);
-        bleStatusTimer = setInterval(refreshControllerStatus, 3000);
+        bleAutoReconnectEnabled = true;
+        startBleStatusPolling();
         await refreshControllerStatus();
 
         logDiv.innerHTML += `Connected to peripheral device profiles stream.<br>`;
     } catch (error) {
         console.error(error);
+        bleAutoReconnectEnabled = false;
         if (bleStatusTimer) {
             clearInterval(bleStatusTimer);
             bleStatusTimer = null;
@@ -545,7 +550,73 @@ async function connectBLE() {
         document.getElementById('optimizeBtn').disabled = true;
         document.getElementById('controllerStatus').innerText = "Unable to connect. Check that the controller is powered on and reconnect.";
         setStatus("Status: Bluetooth Connection Failed", "red");
-        logDiv.innerHTML += `Connection error matrix: ${error.message}<br>`;
+        logDiv.innerHTML += `Connection failed: ${error.message}<br>`;
+    }
+}
+
+function startBleStatusPolling() {
+    if (bleStatusTimer) clearInterval(bleStatusTimer);
+    bleStatusTimer = setInterval(refreshControllerStatus, 3000);
+}
+
+function handleBleDisconnected() {
+    const shouldReconnect = bleAutoReconnectEnabled && Boolean(bleDevice);
+    if (bleStatusTimer) {
+        clearInterval(bleStatusTimer);
+        bleStatusTimer = null;
+    }
+    bleCharacteristic = null;
+    document.getElementById('syncBtn').disabled = true;
+    document.getElementById('optimizeBtn').disabled = true;
+    document.getElementById('controllerStatus').innerText = shouldReconnect
+        ? "Connection lost. Attempting to reconnect..."
+        : "Controller disconnected.";
+    setStatus(shouldReconnect ? "Status: Reconnecting..." : "Status: Disconnected");
+
+    if (shouldReconnect) {
+        void reconnectBLE();
+    }
+}
+
+async function reconnectBLE() {
+    if (bleReconnectInProgress || !bleAutoReconnectEnabled || !bleDevice) return;
+
+    bleReconnectInProgress = true;
+    const disconnectedDevice = bleDevice;
+    const retryDelays = [500, 1500, 3000];
+    try {
+        for (let attempt = 0; attempt < retryDelays.length; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+            if (!bleAutoReconnectEnabled || bleDevice !== disconnectedDevice) return;
+
+            try {
+                const characteristic = await discoverBleCharacteristic(disconnectedDevice);
+                if (!bleAutoReconnectEnabled || bleDevice !== disconnectedDevice ||
+                    !disconnectedDevice.gatt.connected) {
+                    throw new Error("The Bluetooth connection dropped again during recovery.");
+                }
+
+                bleCharacteristic = characteristic;
+                document.getElementById('syncBtn').disabled = false;
+                setStatus("Status: Bluetooth Reconnected", "green");
+                document.getElementById('dataLog').innerHTML += "Bluetooth connection restored.<br>";
+                startBleStatusPolling();
+                await refreshControllerStatus();
+                return;
+            } catch (error) {
+                console.warn(`Bluetooth reconnect attempt ${attempt + 1} failed.`, error);
+                if (attempt === retryDelays.length - 1) {
+                    bleAutoReconnectEnabled = false;
+                    document.getElementById('controllerStatus').innerText =
+                        `Reconnect failed: ${error.message}. Use Connect to ESP32 to try again.`;
+                    setStatus("Status: Reconnect Failed", "red");
+                    document.getElementById('dataLog').innerHTML +=
+                        `Bluetooth reconnect failed: ${error.message}<br>`;
+                }
+            }
+        }
+    } finally {
+        bleReconnectInProgress = false;
     }
 }
 
@@ -680,24 +751,13 @@ async function refreshControllerStatus() {
     }
 }
 
-function handleBleDisconnected() {
-    if (bleStatusTimer) {
-        clearInterval(bleStatusTimer);
-        bleStatusTimer = null;
-    }
-    bleCharacteristic = null;
-    document.getElementById('syncBtn').disabled = true;
-    document.getElementById('optimizeBtn').disabled = true;
-    document.getElementById('controllerStatus').innerText = "Controller disconnected.";
-    setStatus("Status: Disconnected");
-}
-
 function disconnectBLE() {
+    bleAutoReconnectEnabled = false;
     if (bleDevice && bleDevice.gatt.connected) {
         bleDevice.gatt.disconnect();
-        handleBleDisconnected();
-        document.getElementById('dataLog').innerHTML += "Connection closed by user configuration.<br>";
     }
+    handleBleDisconnected();
+    document.getElementById('dataLog').innerHTML += "Connection closed by user configuration.<br>";
 }
 </script>
 </body>
