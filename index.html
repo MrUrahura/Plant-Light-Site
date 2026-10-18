@@ -433,7 +433,8 @@ function decodeControllerSettings(response) {
     ] = response.servos;
     const [
         optimizationIntervalMinutes, timeSynced, inPhotoperiod,
-        optimizing, secondsUntilNextOptimization, secondsSincePreviousOptimization
+        optimizing, secondsUntilNextOptimization, secondsSincePreviousOptimization,
+        optimizationProgress, optimizationFailed
     ] = response.controller;
 
     return {
@@ -443,6 +444,7 @@ function decodeControllerSettings(response) {
         servoRightOpenMs, servoRightCloseMs, optimizationIntervalMinutes,
         timeSynced, inPhotoperiod, optimizing,
         secondsUntilNextOptimization, secondsSincePreviousOptimization,
+        optimizationProgress, optimizationFailed: Boolean(optimizationFailed),
         servoTopClosed: Boolean(shadeState & 1),
         servoLeftClosed: Boolean(shadeState & 2),
         servoRightClosed: Boolean(shadeState & 4),
@@ -470,7 +472,8 @@ async function connectBLE() {
             throw new Error("Web Bluetooth is unavailable in this browser. On a computer, use Chrome or Edge and open this page over HTTPS (or localhost for local testing).");
         }
         const selectedDevice = await navigator.bluetooth.requestDevice({
-            filters: [{ services: [SERVICE_UUID] }] 
+            acceptAllDevices: true,
+            optionalServices: [SERVICE_UUID]
         });
         if (bleDevice && bleDevice !== selectedDevice) {
             bleDevice.removeEventListener('gattserverdisconnected', handleBleDisconnected);
@@ -724,6 +727,9 @@ async function refreshControllerStatus() {
             ? (state.inPhotoperiod ? "Inside photoperiod" : "Outside photoperiod")
             : "Waiting for synchronized time";
         const optimization = state.optimizing ? "Optimization running" : "Optimization idle";
+        const scanProgress = state.optimizing || state.optimizationFailed
+            ? `\nScan measurements: ${state.optimizationProgress ?? 0}/8${state.optimizationFailed ? " (incomplete)" : ""}`
+            : "";
         const next = formatDuration(state.secondsUntilNextOptimization ?? -1);
         const previous = formatDuration(state.secondsSincePreviousOptimization ?? -1);
         const shadeStatus = (closed, targetClosed, moving) => {
@@ -737,7 +743,7 @@ async function refreshControllerStatus() {
             : "Plant: Not configured";
 
         document.getElementById('controllerStatus').innerText =
-            `${photoperiod}\n${optimization}\nNext optimization: ${next}\nSince previous optimization: ${previous}\nSchedule: every ${state.optimizationIntervalMinutes ?? 30} minute(s)\n\nServo states:\nTop: ${shadeStatus(state.servoTopClosed, state.servoTopTargetClosed, state.servoTopMoving)}\nLeft: ${shadeStatus(state.servoLeftClosed, state.servoLeftTargetClosed, state.servoLeftMoving)}\nRight: ${shadeStatus(state.servoRightClosed, state.servoRightTargetClosed, state.servoRightMoving)}\n\n${plant}`;
+            `${photoperiod}\n${optimization}${scanProgress}\nNext optimization: ${next}\nSince previous optimization: ${previous}\nSchedule: every ${state.optimizationIntervalMinutes ?? 30} minute(s)\n\nServo states:\nTop: ${shadeStatus(state.servoTopClosed, state.servoTopTargetClosed, state.servoTopMoving)}\nLeft: ${shadeStatus(state.servoLeftClosed, state.servoLeftTargetClosed, state.servoLeftMoving)}\nRight: ${shadeStatus(state.servoRightClosed, state.servoRightTargetClosed, state.servoRightMoving)}\n\n${plant}`;
         document.getElementById('optimizeBtn').disabled =
             !state.timeSynced || !state.inPhotoperiod || state.optimizing;
         return state;
