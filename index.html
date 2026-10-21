@@ -434,7 +434,7 @@ function decodeControllerSettings(response) {
     const [
         optimizationIntervalMinutes, timeSynced, inPhotoperiod,
         optimizing, secondsUntilNextOptimization, secondsSincePreviousOptimization,
-        optimizationProgress, optimizationFailed
+        optimizationProgress, optimizationFailed, wifiConnected, weatherRead
     ] = response.controller;
 
     return {
@@ -445,6 +445,7 @@ function decodeControllerSettings(response) {
         timeSynced, inPhotoperiod, optimizing,
         secondsUntilNextOptimization, secondsSincePreviousOptimization,
         optimizationProgress, optimizationFailed: Boolean(optimizationFailed),
+        wifiConnected, weatherRead,
         servoTopClosed: Boolean(shadeState & 1),
         servoLeftClosed: Boolean(shadeState & 2),
         servoRightClosed: Boolean(shadeState & 4),
@@ -727,6 +728,13 @@ async function refreshControllerStatus() {
             ? (state.inPhotoperiod ? "Inside photoperiod" : "Outside photoperiod")
             : "Waiting for synchronized time";
         const optimization = state.optimizing ? "Optimization running" : "Optimization idle";
+        const wifiStatus = typeof state.wifiConnected === "boolean"
+            ? (state.wifiConnected ? "Connected" : "Disconnected")
+            : "Unavailable (update controller firmware)";
+        const timeStatus = state.timeSynced ? "Synced" : "Waiting for synchronization";
+        const weatherStatus = typeof state.weatherRead === "boolean"
+            ? (state.weatherRead ? "Forecast read" : "Waiting for forecast")
+            : "Unavailable (update controller firmware)";
         const scanProgress = state.optimizing || state.optimizationFailed
             ? `\nScan measurements: ${state.optimizationProgress ?? 0}/8${state.optimizationFailed ? " (incomplete)" : ""}`
             : "";
@@ -743,7 +751,7 @@ async function refreshControllerStatus() {
             : "Plant: Not configured";
 
         document.getElementById('controllerStatus').innerText =
-            `${photoperiod}\n${optimization}${scanProgress}\nNext optimization: ${next}\nSince previous optimization: ${previous}\nSchedule: every ${state.optimizationIntervalMinutes ?? 30} minute(s)\n\nServo states:\nTop: ${shadeStatus(state.servoTopClosed, state.servoTopTargetClosed, state.servoTopMoving)}\nLeft: ${shadeStatus(state.servoLeftClosed, state.servoLeftTargetClosed, state.servoLeftMoving)}\nRight: ${shadeStatus(state.servoRightClosed, state.servoRightTargetClosed, state.servoRightMoving)}\n\n${plant}`;
+            `Wi-Fi: ${wifiStatus}\nTime: ${timeStatus}\nWeather: ${weatherStatus}\n${photoperiod}\n${optimization}${scanProgress}\nNext optimization: ${next}\nSince previous optimization: ${previous}\nSchedule: every ${state.optimizationIntervalMinutes ?? 30} minute(s)\n\nServo states:\nTop: ${shadeStatus(state.servoTopClosed, state.servoTopTargetClosed, state.servoTopMoving)}\nLeft: ${shadeStatus(state.servoLeftClosed, state.servoLeftTargetClosed, state.servoLeftMoving)}\nRight: ${shadeStatus(state.servoRightClosed, state.servoRightTargetClosed, state.servoRightMoving)}\n\n${plant}`;
         document.getElementById('optimizeBtn').disabled =
             !state.timeSynced || !state.inPhotoperiod || state.optimizing;
         return state;

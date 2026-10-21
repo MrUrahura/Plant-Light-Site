@@ -1,4 +1,5 @@
 # Plant-Box-App
+<img src="images/Website_Connected_1.png" alt="Website Bluetooth Connected Image" width="600">
 
 This repository contains a small browser-based setup and status page for the
 plant-light project. It is a static website: the interface is in `index.html`,
@@ -51,6 +52,8 @@ JSON status, maps that data into the form, writes the configuration as
 browser context (HTTPS, or `localhost` for local development) and a browser
 or compatible BLE-reader integration that supports the page's Bluetooth flow.
 
+Check out all of the [images of its functions](images).
+
 ## Open the website on a computer
 
 ### Local testing
@@ -84,6 +87,7 @@ requires internet access. On a computer, use a browser with Web Bluetooth
 support and grant Bluetooth permission when prompted.
 
 ## Open the website on iOS
+<img src="images/Website_Bluetooth_Connection_iOS.png" alt="iOS Bluetooth Connection Image" width="600">
 
 The website can be used on an iPhone or iPad, including its BLE setup and
 status features, when it is opened through a compatible Bluetooth-reader
